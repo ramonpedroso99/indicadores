@@ -34,11 +34,10 @@ def conteudo_ava_competencia():
         ORDER BY aa.created ASC;
         """
 
-        if so_pendentes:
-            query += " AND aa.data_conclusao IS NULL"
-
-        resultados = await conn.fetch(query)
-        await conn.close()
+        try:
+            resultados = await conn.fetch(query)
+        finally:
+            await conn.close()
 
         return [dict(r) for r in resultados]
 
@@ -98,13 +97,22 @@ def conteudo_ava_competencia():
             label="Escolha o tipo de avaliação"
         ).classes("font-bold")
         botao = ui.button("Buscar Avaliações").classes("mt-2").props("color=positive")
+        spinner_ava = ui.spinner('dots', size='lg').classes('mx-auto mt-2')
+        spinner_ava.set_visibility(False)
         resultado_div = ui.column().classes("mt-4")
 
         async def ao_clicar():
             resultado_div.clear()
+            spinner_ava.set_visibility(True)
             so_pendentes = selecao.value == "Pendentes"
-
-            todas = await buscar_avaliacoes(False)
+            try:
+                todas = await buscar_avaliacoes(False)
+            except Exception as e:
+                spinner_ava.set_visibility(False)
+                with resultado_div:
+                    ui.label(f"❌ Erro ao buscar avaliações: {e}").classes("text-red-600")
+                return
+            spinner_ava.set_visibility(False)
             avaliacoes = todas if not so_pendentes else [a for a in todas if a['dia_conclusao'] is None]
 
             total_avaliacoes = len(todas)
@@ -139,6 +147,8 @@ def conteudo_ava_competencia():
         dropdown_setores = ui.select(options=[]).classes("mb-2 font-bold").style("display: none;")
 
         botao_buscar = ui.button("Buscar").props("color=positive")
+        spinner_colab = ui.spinner('dots', size='lg').classes('mx-auto mt-2')
+        spinner_colab.set_visibility(False)
         resultado_div_colab = ui.column().classes("mt-4")
 
         def atualizar_visibilidade():
@@ -205,7 +215,15 @@ def conteudo_ava_competencia():
             if not termo:
                 return
 
-            avaliacoes = await buscar_avaliacoes(so_pendentes=False)
+            spinner_colab.set_visibility(True)
+            try:
+                avaliacoes = await buscar_avaliacoes(so_pendentes=False)
+            except Exception as e:
+                spinner_colab.set_visibility(False)
+                with resultado_div_colab:
+                    ui.label(f"❌ Erro: {e}").classes("text-red-600")
+                return
+            spinner_colab.set_visibility(False)
             if tipo_busca.value == "Colaborador":
                 avaliacoes = [a for a in avaliacoes if a.get("colaborador") and termo.lower() in a["colaborador"].lower()]
             else:
@@ -228,6 +246,8 @@ def conteudo_ava_competencia():
         select_mes = ui.select(options=list(meses_dict.keys()), label="Escolha o mês").classes("font-bold")
         input_ano = ui.input(label="Digite o ano", placeholder="Ex: 2025").classes("font-bold")
         botao_buscar_mes_ano = ui.button("Buscar").props("color=positive").classes("mt-2")
+        spinner_mes_ano = ui.spinner('dots', size='lg').classes('mx-auto mt-2')
+        spinner_mes_ano.set_visibility(False)
         resultado_div_mes_ano = ui.column().classes("mt-4")
 
         # Função para garantir que os valores sejam JSON serializáveis
@@ -246,15 +266,12 @@ def conteudo_ava_competencia():
                 if mes_selecionado is None or ano_digitado < 1900:
                     raise ValueError
             except Exception:
-                ui.label("❌ Mês ou ano inválido").classes("text-red-600")
+                with resultado_div_mes_ano:
+                    ui.label("❌ Mês ou ano inválido").classes("text-red-600")
                 return
 
-            conn = await asyncpg.connect(
-                user='ramonpedroso',
-                password='9JnJp&ph7c&bf%b9D*2',
-                database='erpv2',
-                host='184.72.149.92'
-            )
+            spinner_mes_ano.set_visibility(True)
+            conn = await conectar_ao_banco()
 
             query = """
                 SELECT 
@@ -280,8 +297,16 @@ def conteudo_ava_competencia():
                 AND f.status_funcionario_id = '1'
                 ORDER BY aa.created ASC;
             """
-            resultados = await conn.fetch(query, mes_selecionado, ano_digitado)
-            await conn.close()
+            try:
+                resultados = await conn.fetch(query, mes_selecionado, ano_digitado)
+            except Exception as e:
+                spinner_mes_ano.set_visibility(False)
+                with resultado_div_mes_ano:
+                    ui.label(f"❌ Erro ao consultar: {e}").classes("text-red-600")
+                return
+            finally:
+                await conn.close()
+            spinner_mes_ano.set_visibility(False)
 
             if not resultados:
                 ui.label(f"Nenhuma avaliação encontrada em {select_mes.value} de {ano_digitado}.").classes("text-red-600")

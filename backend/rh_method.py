@@ -31,8 +31,10 @@ def conteudo_rh():
             );
         """
         conn = await conectar_ao_banco()
-        total = await conn.fetchval(query, fim_mes, inicio_mes)
-        await conn.close()
+        try:
+            total = await conn.fetchval(query, fim_mes, inicio_mes)
+        finally:
+            await conn.close()
         return total
 
     async def buscar_treinamentos(data_inicio: str, data_fim: str):
@@ -48,8 +50,10 @@ def conteudo_rh():
             AND wc_cursos.wc_curso_status_id = 2
         """
         conn = await conectar_ao_banco()
-        rows = await conn.fetch(query)
-        await conn.close()
+        try:
+            rows = await conn.fetch(query)
+        finally:
+            await conn.close()
         return rows
 
     async def somar_carga_horaria(data_inicio: str, data_fim: str) -> float:
@@ -69,8 +73,10 @@ def conteudo_rh():
             AND wc_cursos.wc_curso_status_id = 2;
         """
         conn = await conectar_ao_banco()
-        total = await conn.fetchval(query)
-        await conn.close()
+        try:
+            total = await conn.fetchval(query)
+        finally:
+            await conn.close()
         return total or 0
 
     # Interface com as metas escritas

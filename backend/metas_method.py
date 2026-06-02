@@ -4,39 +4,36 @@ from conexao import conectar_ao_banco
 def conteudo_metas():
     ui.label("🎯 Meta de Atendimento — 80% dos SOAs em até 5 horas").classes("text-2xl font-bold mb-4")
 
-    # 🔽 Seletores de Mês e Ano
     with ui.row().classes('items-center gap-4 mb-4'):
         meses = {
             1: 'Janeiro', 2: 'Fevereiro', 3: 'Março', 4: 'Abril',
             5: 'Maio', 6: 'Junho', 7: 'Julho', 8: 'Agosto',
             9: 'Setembro', 10: 'Outubro', 11: 'Novembro', 12: 'Dezembro'
         }
-
         mes_select = ui.select(meses, value=10, label='Mês')
         ano_select = ui.number(label='Ano', value=2025, min=2020, max=2030)
 
-    # 🔹 Tabela de resultados
     tabela = ui.table(
         columns=[
-            {'name': 'funcionario', 'label': 'Funcionário', 'field': 'funcionario', 'align': 'left'},
-            {'name': 'total_soas', 'label': 'Total de SOAs', 'field': 'total_soas'},
-            {'name': 'soas_no_prazo', 'label': 'No Prazo', 'field': 'soas_no_prazo'},
-            {'name': 'soas_fora_prazo', 'label': 'Fora do Prazo', 'field': 'soas_fora_prazo'},
-            {'name': 'percentual_meta', 'label': '% Meta', 'field': 'percentual_meta'},
+            {'name': 'funcionario',     'label': 'Funcionário',    'field': 'funcionario',     'align': 'left'},
+            {'name': 'total_soas',      'label': 'Total de SOAs',  'field': 'total_soas'},
+            {'name': 'soas_no_prazo',   'label': 'No Prazo',       'field': 'soas_no_prazo'},
+            {'name': 'soas_fora_prazo', 'label': 'Fora do Prazo',  'field': 'soas_fora_prazo'},
+            {'name': 'percentual_meta', 'label': '% Meta',         'field': 'percentual_meta'},
         ],
         rows=[],
         row_key='funcionario',
     ).classes('w-full shadow-lg')
 
-    # 🔁 Função de atualização
+    spinner_metas = ui.spinner('dots', size='lg').classes('mx-auto mt-2')
+    spinner_metas.set_visibility(False)
+
     async def atualizar_dados():
         mes = mes_select.value
-        ano = ano_select.value
+        ano = int(ano_select.value)
+        spinner_metas.set_visibility(True)
+        tabela.rows = []
 
-        ui.notify(f"Consultando dados de {meses[mes]} / {ano}...", type='info')
-
-        conn = await conectar_ao_banco()
-    
         query = f"""
         WITH interacoes_filtradas AS (
             SELECT
@@ -90,23 +87,27 @@ def conteudo_metas():
         ORDER BY percentual_meta DESC;
         """
 
-        resultados = await conn.fetch(query)
-        await conn.close()
-        
-        
+        try:
+            conn = await conectar_ao_banco()
+            try:
+                resultados = await conn.fetch(query)
+            finally:
+                await conn.close()
 
-        tabela.rows = [
-            {
-                'funcionario': r['funcionario'] or 'Desconhecido',
-                'total_soas': r['total_soas'],
-                'soas_no_prazo': r['soas_no_prazo'],
-                'soas_fora_prazo': r['soas_fora_prazo'],
-                'percentual_meta': f"{r['percentual_meta']}%"
-            }
-            for r in resultados
-        ]
-        
-        ui.notify("✅ Dados atualizados com sucesso!", type='positive')
-        
-    # 🔘 Botão de atualização
+            tabela.rows = [
+                {
+                    'funcionario':     r['funcionario'] or 'Desconhecido',
+                    'total_soas':      r['total_soas'],
+                    'soas_no_prazo':   r['soas_no_prazo'],
+                    'soas_fora_prazo': r['soas_fora_prazo'],
+                    'percentual_meta': f"{r['percentual_meta']}%",
+                }
+                for r in resultados
+            ]
+            ui.notify("✅ Dados atualizados com sucesso!", type='positive')
+        except Exception as e:
+            ui.notify(f"❌ Erro ao consultar dados: {e}", type='negative')
+        finally:
+            spinner_metas.set_visibility(False)
+
     ui.button("🔄 Atualizar", on_click=atualizar_dados).classes('mt-4 bg-blue-500 text-white rounded-lg')

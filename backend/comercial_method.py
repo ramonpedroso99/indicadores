@@ -59,9 +59,11 @@ def conteudo_comercial():
             WHERE rn = 1 AND LOWER(status_proposta) = 'aceita';
         """
 
-        total = await conn.fetchval(query_total, data_inicio, data_fim)
-        aceitas = await conn.fetchval(query_aceitas, data_inicio, data_fim)
-        await conn.close()
+        try:
+            total  = await conn.fetchval(query_total,  data_inicio, data_fim)
+            aceitas = await conn.fetchval(query_aceitas, data_inicio, data_fim)
+        finally:
+            await conn.close()
         return total, aceitas
 
     # Interface com metas a serem atingidas

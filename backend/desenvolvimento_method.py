@@ -1,7 +1,7 @@
 from nicegui import ui
 import asyncpg
 import asyncio
-from datetime import datetime
+from datetime import datetime, date
 from conexao import conectar_ao_banco
 
 print(">>> Módulo desenvolvimento_method carregado!")
@@ -122,25 +122,24 @@ def conteudo_desenvolvimento():
         """
 
 
-        resultado1 = await conn.fetchrow(query)
-        
-        atrasados = await conn.fetch(query_atrasados)
-
-    
-        await conn.close()
+        try:
+            resultado1 = await conn.fetchrow(query)
+            atrasados  = await conn.fetch(query_atrasados)
+        finally:
+            await conn.close()
 
         if resultado1 is None:
-            resultado1 = {'dentro_15_dias': 0, 'dentro_30_dias': 0, 'atrasados': 0}
+            resultado1 = {'total_soas': 0, 'dentro_15_dias': 0, 'dentro_30_dias': 0, 'atrasados': 0}
 
         return (
             {
-            'total_soas': resultado1['total_soas'] or 0,
-            'dentro_15_dias': resultado1['dentro_15_dias'] or 0,
-            'dentro_30_dias': resultado1['dentro_30_dias'] or 0,
-            'atrasados': resultado1['atrasados'] or 0
-        },
-        atrasados
-    )
+                'total_soas':     resultado1['total_soas']     or 0,
+                'dentro_15_dias': resultado1['dentro_15_dias'] or 0,
+                'dentro_30_dias': resultado1['dentro_30_dias'] or 0,
+                'atrasados':      resultado1['atrasados']      or 0,
+            },
+            atrasados,
+        )
 
     ui.label('🔴 Tempo de análise - SOAS de Novidade').classes('font-bold text-lg')
     ui.label('Medição mensal')
@@ -153,6 +152,8 @@ def conteudo_desenvolvimento():
         ano_input = ui.number(label="Ano", min=2000, max=2100, value=2025)
         mes_input = ui.number(label="Mês", min=1, max=12, value=1)
 
+        spinner_novidade = ui.spinner('dots', size='lg').classes('mx-auto mt-2')
+        spinner_novidade.set_visibility(False)
         resultado_soa_novidade = ui.column().classes("mt-4")
 
         atrasados_table = ui.table(
@@ -167,7 +168,15 @@ def conteudo_desenvolvimento():
         async def on_calcular1():
             mes = int(mes_input.value)
             ano = int(ano_input.value)
-            dados, atrasados = await indicador_soas_meta(mes, ano)
+            spinner_novidade.set_visibility(True)
+            try:
+                dados, atrasados = await indicador_soas_meta(mes, ano)
+            except Exception as e:
+                spinner_novidade.set_visibility(False)
+                with resultado_soa_novidade:
+                    ui.label(f"❌ Erro: {e}").classes("text-red-600 font-semibold")
+                return
+            spinner_novidade.set_visibility(False)
 
             resultado_soa_novidade.clear()
             atrasados_table.rows.clear()
@@ -213,211 +222,207 @@ def conteudo_desenvolvimento():
 
 
 #########################################SOAS DE ERRO###########################################################################################
-    
+
+    _EMOJI_CRIT = {'Alta': '🔴', 'Media': '🟡', 'Baixa': '🟢'}
+    _META_DIAS  = {'Alta': 7,    'Media': 14,    'Baixa': 35}
+    _META_PERC  = 70  # percentual mínimo para meta atingida
+
+    # CTE reutilizada nas duas queries
+    _CTE_BASE = """
+    WITH ultima_classificacao AS (
+        SELECT DISTINCT ON (si.soa_id)
+            si.soa_id,
+            si.soa_classificacoes_id,
+            si.created          AS data_classificacao,
+            si.interacao_criada_por AS classificador_id
+        FROM soa_interacoes si
+        WHERE si.soa_classificacoes_id IS NOT NULL
+        ORDER BY si.soa_id, si.created DESC
+    ),
+    base AS (
+        SELECT
+            s.sequencial,
+            COALESCE(uc.data_classificacao, s.data_classificacao) AS data_classificacao,
+            COALESCE(fi.nome, fs.nome)                            AS classificador,
+            scr.descricao                                         AS criticidade,
+            s.data_conclusao,
+            (
+                SELECT COUNT(*) - 1
+                FROM generate_series(
+                    COALESCE(uc.data_classificacao, s.data_classificacao)::date,
+                    s.data_conclusao::date,
+                    interval '1 day'
+                ) AS d
+                WHERE EXTRACT(ISODOW FROM d) < 6
+            ) AS dias_uteis
+        FROM soas s
+        LEFT JOIN ultima_classificacao uc  ON uc.soa_id = s.id
+        INNER JOIN soa_classificacoes scf
+            ON scf.id = COALESCE(uc.soa_classificacoes_id, s.soa_classificacoes_id)
+        LEFT JOIN funcionarios fi  ON fi.id = uc.classificador_id
+        LEFT JOIN funcionarios fs  ON fs.id = s.funcionario_classificacao_id
+        LEFT JOIN soa_criticidades scr ON scr.id = s.soa_criticidade_id
+        WHERE scf.descricao = 'Incidente/Erro no Sistema'
+          AND COALESCE(uc.data_classificacao, s.data_classificacao) IS NOT NULL
+          AND s.data_conclusao IS NOT NULL
+          AND s.data_conclusao >= $1
+          AND s.data_conclusao <  $2
+    )
+    """
+
+    _COND_META = """
+        (criticidade = 'Alta'  AND dias_uteis <= 7)
+     OR (criticidade = 'Media' AND dias_uteis <= 14)
+     OR (criticidade = 'Baixa' AND dias_uteis <= 35)
+    """
+
+    _QUERY_RESUMO = _CTE_BASE + f"""
+    SELECT
+        criticidade,
+        COUNT(*) AS total,
+        COUNT(CASE WHEN {_COND_META} THEN 1 END) AS dentro_meta,
+        ROUND(
+            100.0 * COUNT(CASE WHEN {_COND_META} THEN 1 END)
+            / NULLIF(COUNT(*), 0),
+        2) AS perc_meta
+    FROM base
+    WHERE criticidade IS NOT NULL
+    GROUP BY criticidade
+    ORDER BY CASE criticidade WHEN 'Alta' THEN 1 WHEN 'Media' THEN 2 WHEN 'Baixa' THEN 3 ELSE 4 END;
+    """
+
+    _QUERY_DETALHE = _CTE_BASE + f"""
+    SELECT
+        sequencial,
+        data_classificacao,
+        classificador,
+        criticidade,
+        data_conclusao,
+        dias_uteis,
+        CASE WHEN {_COND_META} THEN TRUE ELSE FALSE END AS dentro_meta
+    FROM base
+    ORDER BY sequencial;
+    """
+
     async def calcular_soas_erro(mes: int, ano: int):
-        conn = await asyncpg.connect(
-            user='ramonpedroso',
-            password='9JnJp&ph7c&bf%b9D*2',
-            database='erpv2',
-            host='184.72.149.92',
-            port=5432
-        )
+        data_inicio = date(ano, mes, 1)
+        data_fim    = date(ano + 1, 1, 1) if mes == 12 else date(ano, mes + 1, 1)
 
-        query = """
-        WITH soas_tempo AS (
-            SELECT
-                S.id AS soa_id,
-                SI.created AS primeira_interacao_data,
-                (SELECT I.created 
-                FROM soa_interacoes I 
-                WHERE I.soa_id = SI.soa_id 
-                AND I.soa_status_id = 4 
-                ORDER BY I.created ASC
-                LIMIT 1) AS proxima_interacao_data,
-                EXTRACT(EPOCH FROM (
-                    (SELECT I.created 
-                    FROM soa_interacoes I 
-                    WHERE I.soa_id = SI.soa_id 
-                    AND I.soa_status_id = 4 
-                    ORDER BY I.created ASC
-                    LIMIT 1) - SI.created
-                )) / 3600 AS horas_analise
-            FROM soa_interacoes SI
-            LEFT JOIN soas S ON S.id = SI.soa_id
-            WHERE S.soa_classificacoes_id = 4
-            AND S.soa_criticidade_id = 3
-            AND EXTRACT(MONTH FROM S.data_conclusao) = $1
-            AND EXTRACT(YEAR FROM S.data_conclusao) = $2
-            AND SI.id = (SELECT I.id 
-                        FROM soa_interacoes I 
-                        WHERE I.soa_id = SI.soa_id
-                            AND I.soa_classificacoes_id = 4
-                        ORDER BY I.created DESC
-                        LIMIT 1)
-        )
-        SELECT
-            COUNT(*) AS total_soas,
-            COUNT(CASE WHEN horas_analise <= 72 THEN 1 END) AS dentro_72h,
-            COUNT(CASE WHEN horas_analise > 72 AND horas_analise <= 104 THEN 1 END) AS entre_72_e_104h,
-            COUNT(CASE WHEN horas_analise > 104 THEN 1 END) AS fora_104h,
-            ROUND(100.0 * COUNT(CASE WHEN horas_analise <= 72 THEN 1 END)/COUNT(*), 2) AS perc_dentro_72h,
-            ROUND(100.0 * COUNT(CASE WHEN horas_analise <= 104 THEN 1 END)/COUNT(*), 2) AS perc_dentro_104h
-        FROM soas_tempo;
-        """
+        conn = await conectar_ao_banco()
+        try:
+            resumo  = await conn.fetch(_QUERY_RESUMO,  data_inicio, data_fim)
+            detalhe = await conn.fetch(_QUERY_DETALHE, data_inicio, data_fim)
+        finally:
+            await conn.close()
+        return {'resumo': resumo, 'detalhe': detalhe}
 
-        query_atrasados = """
-        WITH soas_tempo AS (
-        SELECT
-        S.id AS soa_id,
-        S.sequencial AS sequencial_soa,
-        SI.created AS primeira_interacao_data,
-        (SELECT I.created 
-        FROM soa_interacoes I 
-        WHERE I.soa_id = SI.soa_id 
-        AND I.soa_status_id = 4 
-        ORDER BY I.created ASC
-        LIMIT 1) AS proxima_interacao_data,
-        EXTRACT(EPOCH FROM (
-            (SELECT I.created 
-            FROM soa_interacoes I 
-            WHERE I.soa_id = SI.soa_id 
-            AND I.soa_status_id = 4 
-            ORDER BY I.created ASC
-            LIMIT 1) - SI.created
-        )) / 3600 AS horas_analise
-        FROM soa_interacoes SI
-        LEFT JOIN soas S ON S.id = SI.soa_id
-        WHERE S.soa_classificacoes_id = 4
-        AND S.soa_criticidade_id = 3
-        AND EXTRACT(MONTH FROM S.data_conclusao) = $1
-        AND EXTRACT(YEAR FROM S.data_conclusao) = $2
-        AND SI.id = (
-        SELECT I.id 
-        FROM soa_interacoes I 
-        WHERE I.soa_id = SI.soa_id
-            AND I.soa_classificacoes_id = 4
-        ORDER BY I.created DESC
-        LIMIT 1
-            )
-        )
-        SELECT
-            soa_id,
-            sequencial_soa,
-            primeira_interacao_data,
-            proxima_interacao_data,
-            horas_analise
-        FROM soas_tempo
-        WHERE horas_analise > 104
-        ORDER BY primeira_interacao_data ASC;
-        """
-
-        
-
-        resultado = await conn.fetchrow(query, mes, ano)
-        atrasados = await conn.fetch(query_atrasados, mes, ano)
-
-        await conn.close()
-        
-        return {
-            "totais": resultado,
-            "atrasados": atrasados
-        }
-
-    ui.label('🔴 Tempo de análise - SOAS de Erro').classes('font-bold text-lg')
+    ui.label('🔴 Tempo de análise - SOAs de Erro').classes('font-bold text-lg mt-6')
     ui.label('Medição mensal')
-    ui.label('Resultado: A meta é que analisem 70% dos SOAs em 72 horas úteis (criticidade alta) e 100% em 13 dias úteis.')
-    
-    
-    with ui.card().classes("p-6 w-[600px] mx-auto mt-10 shadow-lg rounded-2xl"):
+    ui.label('Meta: 🔴 Alta ≤ 7 dias úteis | 🟡 Média ≤ 14 dias úteis | 🟢 Baixa ≤ 35 dias úteis')
+
+    with ui.card().classes("p-6 w-full mt-4 shadow-lg rounded-2xl"):
         ui.label("📊 Meta - Tempo de Análise de SOAs de Erro").classes("text-2xl font-bold mb-4 text-center")
 
-        # Inputs numéricos
-        ano1_input = ui.number(label="Ano", value=2025, min=2000, max=2100).classes("w-1/2")
-        mes1_input = ui.number(label="Mês", value=8, min=1, max=12).classes("w-1/2")
+        with ui.row().classes("gap-4 items-end flex-wrap"):
+            ano1_input = ui.number(label="Ano", value=datetime.now().year,  min=2000, max=2100).classes("w-28")
+            mes1_input = ui.number(label="Mês", value=datetime.now().month, min=1,    max=12  ).classes("w-28")
 
-        # Card para resultados
-        with ui.row().classes("w-full justify-center mt-4"):
-            resultado_novidade= ui.column().classes("w-full gap-4")
-            
+        spinner_erro = ui.spinner('dots', size='lg').classes('mx-auto mt-2')
+        spinner_erro.set_visibility(False)
+        resultado_erro = ui.column().classes("w-full mt-4")
 
         async def on_calcular():
-            resultado_novidade.clear()
-            dados = await calcular_soas_erro(int(mes1_input.value), int(ano1_input.value))
-            totais = dados["totais"]
-            soas_atrasados = dados["atrasados"]
+            resultado_erro.clear()
+            spinner_erro.set_visibility(True)
+            try:
+                dados = await calcular_soas_erro(int(mes1_input.value), int(ano1_input.value))
+            except Exception as e:
+                spinner_erro.set_visibility(False)
+                with resultado_erro:
+                    ui.label(f"❌ Erro ao consultar banco de dados: {e}").classes("text-red-600 font-semibold")
+                return
+            spinner_erro.set_visibility(False)
+            resumo  = dados['resumo']
+            detalhe = dados['detalhe']
 
-            if totais["total_soas"] <= 1:
-                with resultado_novidade:
-                    ui.label("Nenhum SOA encontrado para este período.").classes("text-lg font-semibold text-center")
+            if not resumo:
+                with resultado_erro:
+                    ui.label("Nenhum SOA de Erro encontrado para este período.").classes("text-gray-500 text-center text-lg")
                 return
 
-            total_ajustado = totais["total_soas"]
-            fora_meta = totais['fora_104h']
+            with resultado_erro:
+                # ── Totais gerais ─────────────────────────────────────────
+                total_geral      = sum(r['total']       for r in resumo)
+                dentro_meta_ger  = sum(r['dentro_meta'] for r in resumo)
+                atrasados_geral  = total_geral - dentro_meta_ger
+                perc_geral       = round(dentro_meta_ger / total_geral * 100, 1) if total_geral else 0
 
-            # KPIs principais em cards
-            with resultado_novidade:
-                with ui.row().classes("w-full justify-around"):
-                    with ui.card().classes("p-4 bg-green-100 text-center").tight().style("min-width:120px").props("flat"):
-                        ui.label(f"{totais['dentro_72h']}").classes("text-2xl font-bold text-green-700")
-                        ui.label("≤ 72h")
-                    with ui.card().classes("p-4 bg-yellow-100 text-center").tight().style("min-width:120px").props("flat"):
-                        ui.label(f"{totais['entre_72_e_104h']}").classes("text-2xl font-bold text-yellow-700")
-                        ui.label("72h-104h")
-                    with ui.card().classes("p-4 bg-red-100 text-center").tight().style("min-width:120px").props("flat"):
-                        ui.label(f"{totais['fora_104h']}").classes("text-2xl font-bold text-red-700")
-                        ui.label("≤ 104h")
+                with ui.card().classes("w-full p-4 mb-4 bg-gray-50").props("flat bordered"):
+                    ui.label("📋 Resumo Geral do Período").classes("font-semibold text-gray-700 mb-2")
+                    with ui.row().classes("gap-6 flex-wrap items-center"):
+                        with ui.column().classes("items-center"):
+                            ui.label(str(total_geral)).classes("text-3xl font-bold text-gray-800")
+                            ui.label("Total de SOAs").classes("text-sm text-gray-500")
+                        with ui.column().classes("items-center"):
+                            ui.label(str(dentro_meta_ger)).classes("text-3xl font-bold text-green-600")
+                            ui.label("Dentro do prazo").classes("text-sm text-gray-500")
+                        with ui.column().classes("items-center"):
+                            ui.label(str(atrasados_geral)).classes("text-3xl font-bold text-red-600")
+                            ui.label("Atrasados").classes("text-sm text-gray-500")
+                        with ui.column().classes("items-center"):
+                            cor_perc = "text-green-600" if perc_geral >= _META_PERC else "text-red-600"
+                            ui.label(f"{perc_geral}%").classes(f"text-3xl font-bold {cor_perc}")
+                            ui.label(f"Meta: ≥ {_META_PERC}%").classes("text-sm text-gray-500")
 
-            # Percentuais
-            with resultado_novidade:
-                ui.label(f"🟢 SOAs dentro de 72h: {totais['perc_dentro_72h']}%").classes("text-green-700 text-lg")
-                ui.label(f"🟡 SOAs dentro de 104h: {totais['perc_dentro_104h']}%").classes("text-yellow-700 text-lg")
-                ui.label(f"🔴 SOAs atrasados: {totais['fora_104h']}").classes("text-red-700 text-lg")
-                
-            # Total de SOAs
-            with resultado_novidade:
-                ui.label(f"Total de SOAs: {total_ajustado}").classes("text-xl font-bold text-center mt-2")
-            
-            # Gráfico de pizza
-            with resultado_novidade:
-                ui.label("📊 Distribuição dos SOAs").classes("text-lg font-semibold mt-4")
-                ui.echart({
-                    'tooltip': {'trigger': 'item'},
-                    'color': ['#4CAF50', 'yellow', 'red'],
-                    'series': [{
-                        'type': 'pie',
-                        'radius': '70%',
-                        'data': [
-                            {'value': totais['dentro_72h'], 'name': '≤ 72h'},
-                            {'value': totais['entre_72_e_104h'], 'name': '72h-104h'},
-                            {'value': totais['fora_104h'], 'name': '≤ 104h'},
-                        ]
-                    }]
-                }).classes("h-64 w-full")
-            
-            if soas_atrasados:
-                with resultado_novidade:
-                    ui.label("Tabela de SOAs Atrasados").classes("font-bold mx-auto")
-                    ui.table(
-                        columns=[
-                            {"name": "soa_id", "label": "SOA ID", "field": "soa_id"},
-                            {"name": "unidade", "label": "Unidade", "field": "unidade"},
-                            {"name": "primeira_int", "label": "Primeira Interção", "field": "primeira_int"},
-                            {"name": "proxima_int", "label": "Próxima interação", "field": "proxima_int"},
-                            {"name": "horas_analise", "label": "Horas análise", "field": "horas_analise"},
-                        ],
-                        rows=[
-                            {
-                                "soa_id": s["soa_id"],
-                                "unidade": s["sequencial_soa"],
-                                "primeira_int": s["primeira_interacao_data"].strftime("%Y-%m-%d %H:%M"),
-                                "proxima_int": s["proxima_interacao_data"].strftime("%Y-%m-%d %H:%M"),
-                                "horas_analise": round(s["horas_analise"], 2)
-                            }
-                            for s in soas_atrasados
-                        ]
-                    ).classes("w-full")
-            else:
-                with resultado_novidade:
-                    ui.label("Nenhum SOA atrasado encontrado neste período.").classes("text-lg font-semibold text-center")
-                    
+                # ── Cards por criticidade ─────────────────────────────────
+                ui.label("Resultado por Criticidade").classes("font-semibold text-gray-700 mb-2")
+                with ui.row().classes("gap-4 flex-wrap"):
+                    for r in resumo:
+                        crit   = r['criticidade']
+                        emoji  = _EMOJI_CRIT.get(crit, '⚪')
+                        meta_d = _META_DIAS.get(crit, '?')
+                        perc   = float(r['perc_meta']) if r['perc_meta'] is not None else 0.0
+                        ok     = perc >= _META_PERC
+                        cor    = 'text-green-600' if ok else 'text-red-600'
+
+                        atrasados_crit = r['total'] - r['dentro_meta']
+                        with ui.card().classes("p-4 text-center flex-1").props("flat bordered"):
+                            ui.label(f"{emoji} Criticidade {crit}").classes("font-bold text-base")
+                            ui.label(f"Prazo: ≤ {meta_d} dias úteis").classes("text-xs text-gray-400 mt-1")
+                            ui.label(f"Meta: ≥ {_META_PERC}% no prazo").classes("text-xs text-gray-400")
+                            ui.label(f"{r['dentro_meta']} no prazo / {r['total']} total").classes("text-sm text-gray-600 mt-2")
+                            ui.label(f"⚠️ {atrasados_crit} atrasado{'s' if atrasados_crit != 1 else ''}").classes(
+                                "text-sm text-red-500 font-semibold" if atrasados_crit > 0 else "text-sm text-gray-400"
+                            )
+                            ui.label(f"{perc:.1f}%").classes(f"text-2xl font-bold {cor} mt-1")
+                            ui.label("✅ Meta atingida" if ok else "⚠️ Fora da meta").classes(f"text-sm {cor} mt-1")
+
+                # ── Tabela de detalhamento (colapsável) ──────────────────
+                colunas_det = [
+                    {'name': 'sequencial',         'label': 'SOA',               'field': 'sequencial',         'align': 'left'  },
+                    {'name': 'criticidade',        'label': 'Criticidade',       'field': 'criticidade',        'align': 'left'  },
+                    {'name': 'classificador',      'label': 'Classificador',     'field': 'classificador',      'align': 'left'  },
+                    {'name': 'data_classificacao', 'label': 'Data Classificação','field': 'data_classificacao', 'align': 'left'  },
+                    {'name': 'data_conclusao',     'label': 'Conclusão',         'field': 'data_conclusao',     'align': 'left'  },
+                    {'name': 'dias_uteis',         'label': 'Dias Úteis',        'field': 'dias_uteis',         'align': 'center'},
+                    {'name': 'status',             'label': 'Status',            'field': 'status',             'align': 'center'},
+                ]
+                rows_det = [
+                    {
+                        'sequencial':         r['sequencial'],
+                        'criticidade':        r['criticidade'] or 'N/A',
+                        'classificador':      r['classificador'] or '-',
+                        'data_classificacao': r['data_classificacao'].strftime('%d/%m/%Y') if r['data_classificacao'] else '-',
+                        'data_conclusao':     r['data_conclusao'].strftime('%d/%m/%Y')     if r['data_conclusao']     else '-',
+                        'dias_uteis':         int(r['dias_uteis']) if r['dias_uteis'] is not None else '-',
+                        'status':             '✅' if r['dentro_meta'] else '⚠️',
+                    }
+                    for r in detalhe
+                ]
+                with ui.expansion(
+                    f'📋 Detalhamento dos SOAs — {len(rows_det)} registros',
+                    icon='table_rows',
+                ).classes("w-full mt-4 border border-gray-200 rounded-xl"):
+                    ui.table(columns=colunas_det, rows=rows_det, row_key='sequencial').classes("w-full")
+
         ui.button("Calcular", on_click=lambda: asyncio.create_task(on_calcular())).classes("mt-4 bg-blue-600 text-white w-full")
