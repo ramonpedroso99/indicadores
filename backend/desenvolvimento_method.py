@@ -247,13 +247,15 @@ def conteudo_desenvolvimento():
             scr.descricao                                         AS criticidade,
             s.data_conclusao,
             (
-                SELECT COUNT(*) - 1
+                SELECT GREATEST(COUNT(*) - 1, 0)
                 FROM generate_series(
                     COALESCE(uc.data_classificacao, s.data_classificacao)::date,
                     s.data_conclusao::date,
                     interval '1 day'
                 ) AS d
+                LEFT JOIN feriados f ON f.data_feriado = d::date
                 WHERE EXTRACT(ISODOW FROM d) < 6
+                  AND f.data_feriado IS NULL
             ) AS dias_uteis
         FROM soas s
         LEFT JOIN ultima_classificacao uc  ON uc.soa_id = s.id
