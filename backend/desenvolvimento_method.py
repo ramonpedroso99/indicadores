@@ -227,45 +227,38 @@ def conteudo_desenvolvimento():
     _META_DIAS  = {'Alta': 7,    'Media': 14,    'Baixa': 35}
     _META_PERC  = 70  # percentual mínimo para meta atingida
 
-    # CTE reutilizada nas duas queries
+    # CTE reutilizada nas duas queries.
+    # Usa os campos AUTORITATIVOS da tabela soas (soa_classificacoes_id e data_classificacao),
+    # igual à meta de Novidade — em vez de reconstruir a classificação pelo histórico de
+    # interações (DISTINCT ON), que era não-determinístico e media o prazo a partir da última
+    # interação (data tarde demais), além de descartar SOAs marcados depois como "Não Classificado".
+    #   soa_classificacoes_id = 4  ->  'Incidente/Erro no Sistema'
     _CTE_BASE = """
-    WITH ultima_classificacao AS (
-        SELECT DISTINCT ON (si.soa_id)
-            si.soa_id,
-            si.soa_classificacoes_id,
-            si.created          AS data_classificacao,
-            si.interacao_criada_por AS classificador_id
-        FROM soa_interacoes si
-        WHERE si.soa_classificacoes_id IS NOT NULL
-        ORDER BY si.soa_id, si.created DESC
-    ),
-    base AS (
+    WITH base AS (
         SELECT
             s.sequencial,
-            COALESCE(uc.data_classificacao, s.data_classificacao) AS data_classificacao,
-            COALESCE(fi.nome, fs.nome)                            AS classificador,
+            scf.descricao                                         AS tipo,
+            s.data_classificacao                                  AS data_classificacao,
+            fs.nome                                               AS classificador,
             scr.descricao                                         AS criticidade,
             s.data_conclusao,
-            (
-                SELECT GREATEST(COUNT(*) - 1, 0)
+            GREATEST((
+                SELECT COUNT(*)
                 FROM generate_series(
-                    COALESCE(uc.data_classificacao, s.data_classificacao)::date,
+                    s.data_classificacao::date,
                     s.data_conclusao::date,
                     interval '1 day'
                 ) AS d
                 LEFT JOIN feriados f ON f.data_feriado = d::date
                 WHERE EXTRACT(ISODOW FROM d) < 6
                   AND f.data_feriado IS NULL
-            ) AS dias_uteis
+            ) - 1, 0) AS dias_uteis
         FROM soas s
-        LEFT JOIN ultima_classificacao uc  ON uc.soa_id = s.id
-        INNER JOIN soa_classificacoes scf
-            ON scf.id = COALESCE(uc.soa_classificacoes_id, s.soa_classificacoes_id)
-        LEFT JOIN funcionarios fi  ON fi.id = uc.classificador_id
-        LEFT JOIN funcionarios fs  ON fs.id = s.funcionario_classificacao_id
-        LEFT JOIN soa_criticidades scr ON scr.id = s.soa_criticidade_id
-        WHERE scf.descricao = 'Incidente/Erro no Sistema'
-          AND COALESCE(uc.data_classificacao, s.data_classificacao) IS NOT NULL
+        LEFT JOIN funcionarios fs        ON fs.id = s.funcionario_classificacao_id
+        LEFT JOIN soa_criticidades scr   ON scr.id = s.soa_criticidade_id
+        LEFT JOIN soa_classificacoes scf ON scf.id = s.soa_classificacoes_id
+        WHERE s.soa_classificacoes_id = 4          -- 4 = Incidente/Erro no Sistema
+          AND s.data_classificacao IS NOT NULL
           AND s.data_conclusao IS NOT NULL
           AND s.data_conclusao >= $1
           AND s.data_conclusao <  $2
@@ -296,6 +289,7 @@ def conteudo_desenvolvimento():
     _QUERY_DETALHE = _CTE_BASE + f"""
     SELECT
         sequencial,
+        tipo,
         data_classificacao,
         classificador,
         criticidade,
@@ -402,6 +396,7 @@ def conteudo_desenvolvimento():
                 # ── Tabela de detalhamento (colapsável) ──────────────────
                 colunas_det = [
                     {'name': 'sequencial',         'label': 'SOA',               'field': 'sequencial',         'align': 'left'  },
+                    {'name': 'tipo',               'label': 'Tipo',              'field': 'tipo',               'align': 'left'  },
                     {'name': 'criticidade',        'label': 'Criticidade',       'field': 'criticidade',        'align': 'left'  },
                     {'name': 'classificador',      'label': 'Classificador',     'field': 'classificador',      'align': 'left'  },
                     {'name': 'data_classificacao', 'label': 'Data Classificação','field': 'data_classificacao', 'align': 'left'  },
@@ -412,6 +407,7 @@ def conteudo_desenvolvimento():
                 rows_det = [
                     {
                         'sequencial':         r['sequencial'],
+                        'tipo':               r['tipo'] or '-',
                         'criticidade':        r['criticidade'] or 'N/A',
                         'classificador':      r['classificador'] or '-',
                         'data_classificacao': r['data_classificacao'].strftime('%d/%m/%Y') if r['data_classificacao'] else '-',
